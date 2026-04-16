@@ -1,0 +1,27 @@
+# --- Security (CRITICAL) ---
+.env
+.streamlit/secrets.toml
+
+# --- Python Environment ---
+venv/
+.venv/
+env/
+bin/
+lib/
+include/
+
+# --- Python Cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Vector Database ---
+chroma_db/
+
+# --- Project Specific ---
+.ipynb_checkpoints/
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db

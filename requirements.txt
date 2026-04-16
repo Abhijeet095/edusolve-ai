@@ -1,0 +1,39 @@
+# =============================================================================
+# EduSolve AI — Requirements
+# Install with: pip install -r requirements.txt
+#
+# Versions are pinned to prevent breaking changes from LangChain updates.
+# If you upgrade any LangChain package, upgrade ALL of them together —
+# they have strict inter-version compatibility requirements.
+# =============================================================================
+
+# --- Core App ---
+streamlit==1.45.1
+python-dotenv==1.2.1
+Pillow==10.4.0
+
+# --- LangChain (all packages must stay version-compatible with each other) ---
+langchain==0.3.25
+langchain-core==0.3.58
+langchain-groq==0.3.8
+langchain-huggingface==0.1.2
+langchain-chroma==0.2.4
+langchain-community==0.3.24       # used by ingest.py → PyPDFLoader
+langchain-text-splitters==0.3.8   # used by ingest.py → RecursiveCharacterTextSplitter
+
+# --- Vector Database ---
+chromadb==0.6.3
+
+# --- Embeddings model (used by HuggingFaceEmbeddings) ---
+sentence-transformers==3.4.1
+
+# --- PDF ingestion (used by ingest.py) ---
+pypdf==4.3.1                       # backend used by PyPDFLoader to read PDFs
+
+# =============================================================================
+# DEV / UTILITY ONLY — Not required to run the app
+# Install separately if needed: pip install groq
+# -----------------------------------------------------------------------------
+# groq==0.13.1                     # direct Groq SDK — only used by list_models.py
+#                                  # Uncomment if you need it locally
+# =============================================================================
