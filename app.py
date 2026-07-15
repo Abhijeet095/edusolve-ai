@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import base64
+import html
 from PIL import Image
 from io import BytesIO
 from dotenv import load_dotenv
@@ -10,15 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from langchain.chains import ConversationalRetrievalChain       # ← replaces RetrievalQA
-from langchain.memory import ConversationBufferWindowMemory     # ← new: chat memory
-from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from config import (
     CHAT_MODEL, VISION_MODEL,
     CHAT_TEMPERATURE, VISION_TEMPERATURE,
-    EMBEDDING_MODEL, DB_PATH,
+    EMBEDDING_MODEL, DB_PATH, RETRIEVER_K, MAX_RETRIEVAL_DISTANCE,
     GRADES, SUBJECTS,
     MEMORY_WINDOW_K,
     CONFIDENCE_OPTIONS,
@@ -36,9 +34,6 @@ from prompts import (
 load_dotenv()
 groq_key = os.getenv("GROQ_API_KEY")
 
-# Validate API key at startup — show a friendly error before anything else loads.
-# Without this, the app loads fine but crashes on the student's first question
-# with a raw technical error they won't understand.
 if not groq_key:
     st.set_page_config(page_title="EduSolve AI", page_icon="🎓")
     st.error(
@@ -49,42 +44,107 @@ if not groq_key:
     )
     st.stop()
 
-
-# build_system_prompt(), generate_followups(), generate_practice_question()
-# moved to prompts.py — imported at top of file.
-
-
 # =============================================================================
 # PAGE CONFIGURATION
+# — Changed layout to "centered" for mobile compatibility
 # =============================================================================
+
 st.set_page_config(
     page_title=APP_TITLE,
-    layout=APP_LAYOUT,
+    layout="wide",
     page_icon=APP_ICON
 )
 
-st.markdown("""
-    <style>
-    .stChatMessage { border-radius: 8px; border: 1px solid #e0e0e0; padding: 15px; margin-bottom: 10px; }
-    .source-tag { color: #28a745; font-weight: bold; font-size: 0.8rem; margin-top: 8px; display: block; }
-    .fallback-warning { background: #fff8e1; border-left: 4px solid #f9a825; padding: 8px 12px;
-                        border-radius: 4px; font-size: 0.85rem; margin-top: 8px; }
-    p { line-height: 1.6; }
-    div[data-testid="stHorizontalBlock"] button {
-        font-size: 0.78rem !important;
-        padding: 4px 8px !important;
-        min-height: 0 !important;
-        height: auto !important;
-        white-space: normal !important;
-        line-height: 1.3 !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# =============================================================================
+# MOBILE-OPTIMISED CSS
+# Key changes vs original:
+#   • font-size: 16px on inputs  → prevents iOS auto-zoom
+#   • min-height: 44px on buttons → Apple HIG minimum tap target
+#   • width: 100% on buttons      → full-width tap areas on small screens
+#   • flex-direction: column on radio → stacks grade options vertically
+#   • max-width: 100% on images   → no overflow on narrow phones
+#   • min-width: 280px on sidebar → readable when opened on mobile
+# =============================================================================
 
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root { --blue:#2563EB; --green:#16A34A; --orange:#F59E0B; --ink:#0F172A; --muted:#64748B; --line:#E2E8F0; --surface:#FFFFFF; --page:#F8FAFC; }
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; font-size:16px !important; }
+[data-testid="stAppViewContainer"] { background:var(--page); color:var(--ink); }
+.stApp, [data-testid="stAppViewContainer"] * { color:var(--ink); }
+header[data-testid="stHeader"] { background:var(--page) !important; border-bottom:1px solid var(--line); }
+header[data-testid="stHeader"] * { color:var(--muted) !important; }
+.block-container { max-width:none; width:100%; padding:2rem 3rem 7rem; }
+
+/* Brand, headings, and reusable cards */
+.brand-lockup { text-align:center; margin:1.6rem 0 1.25rem; }
+.brand-mark { width:58px; height:58px; display:inline-flex; align-items:center; justify-content:center; border-radius:18px; background:#DBEAFE; color:var(--blue); font-size:1.8rem; margin-bottom:.9rem; }
+.brand-title { font-size:2rem; font-weight:800; letter-spacing:-.05em; color:var(--ink); margin:0; }
+.brand-subtitle { color:var(--blue); font-size:1rem; font-weight:700; margin:.35rem 0 .7rem; }
+.brand-copy { color:var(--muted); font-size:.95rem; line-height:1.65; margin:0 auto; max-width:455px; }
+.page-kicker { color:var(--blue); font-weight:700; font-size:.78rem; text-transform:uppercase; letter-spacing:.1em; margin:0 0 .35rem; }
+.page-title { color:var(--ink); font-size:1.65rem; font-weight:800; letter-spacing:-.04em; margin:0; }
+.page-copy { color:var(--muted); margin:.35rem 0 1.4rem; }
+.section-label { color:var(--ink); font-size:.94rem; font-weight:700; margin:.1rem 0 .7rem; }
+.status-pill { display:inline-block; background:#DCFCE7; color:#166534; border-radius:999px; padding:.4rem .7rem; font-size:.75rem; font-weight:700; }
+.sidebar-heading { color:var(--muted); font-size:.72rem; font-weight:800; text-transform:uppercase; letter-spacing:.1em; margin:1.1rem 0 .55rem; }
+.sidebar-name { color:var(--ink); font-size:1.05rem; font-weight:800; margin:0 0 .15rem; }
+.sidebar-meta { color:var(--muted); font-size:.84rem; margin:0; }
+.upload-title { color:var(--ink); font-size:.92rem; font-weight:700; margin:0 0 .2rem; }
+.upload-copy { color:var(--muted); font-size:.8rem; margin:0 0 .55rem; }
+.empty-state { text-align:center; max-width:670px; margin:3rem auto 1.4rem; padding:2.1rem 1.25rem; }
+.empty-icon { display:inline-flex; align-items:center; justify-content:center; width:52px; height:52px; border-radius:16px; background:#DBEAFE; font-size:1.5rem; }
+.empty-state h2 { color:var(--ink); font-size:1.45rem; letter-spacing:-.04em; margin:.8rem 0 .35rem; }
+.empty-state p { color:var(--muted); margin:0; }
+.hint-banner { border:1px solid #BFDBFE; background:#EFF6FF; color:#1D4ED8; border-radius:14px; padding:.8rem 1rem; margin:.2rem 0 1rem; }
+.fallback-warning { background:#FFFBEB; border:1px solid #FDE68A; border-left:4px solid var(--orange); padding:.75rem 1rem; border-radius:12px; font-size:.86rem; margin-top:.75rem; color:#92400E; }
+
+/* Streamlit controls */
+[data-testid="stVerticalBlockBorderWrapper"] { background:var(--surface); border:1px solid var(--line); border-radius:18px; box-shadow:0 8px 24px rgba(15,23,42,.04); color:var(--ink) !important; }
+[data-testid="stVerticalBlockBorderWrapper"] *, [data-testid="stSidebar"] * { color:var(--ink); }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] *, .sidebar-meta, .upload-copy { color:var(--muted) !important; }
+[data-testid="stButton"] button, .stButton > button { min-height:46px; width:100%; border-radius:12px; border:1px solid #CBD5E1; background:#FFF; color:#1E293B !important; font-weight:600; font-size:.9rem; transition:all .18s ease; white-space:normal; }
+[data-testid="stButton"] button:hover, .stButton > button:hover { border-color:#93C5FD; color:#1D4ED8 !important; background:#EFF6FF; transform:translateY(-1px); }
+[data-testid="stButton"] button[kind="primary"], .stButton > button[kind="primary"] { background:var(--blue); border-color:var(--blue); color:#FFF !important; box-shadow:0 6px 14px rgba(37,99,235,.2); }
+[data-testid="stButton"] button[kind="primary"] *, .stButton > button[kind="primary"] * { color:#FFF !important; }
+[data-testid="stButton"] button[kind="primary"]:hover, .stButton > button[kind="primary"]:hover { background:#1D4ED8; color:#FFF !important; }
+[data-testid="stTextInput"] input, [data-testid="stTextInput"] input::placeholder, [data-testid="stChatInput"] textarea, [data-testid="stChatInput"] textarea::placeholder { color:var(--ink) !important; -webkit-text-fill-color:var(--ink) !important; opacity:1; }
+[data-testid="stTextInput"] input, [data-testid="stSelectbox"] div[data-baseweb="select"] > div, [data-testid="stFileUploader"] section { border-color:#CBD5E1 !important; border-radius:12px !important; background:#FFF !important; }
+[data-testid="stSelectbox"] div[data-baseweb="select"] *, [data-testid="stFileUploader"] * { color:var(--ink) !important; }
+[data-testid="stTextInput"] input { min-height:46px; }
+[data-testid="stRadio"] > div { gap:.6rem; }
+[data-testid="stRadio"] label { padding:.45rem .1rem; }
+
+/* Sidebar */
+[data-testid="stSidebar"] { background:#FFF; border-right:1px solid var(--line); min-width:285px; }
+[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] { box-shadow:none; border-radius:14px; }
+[data-testid="stSidebar"] .stButton > button { min-height:42px; font-size:.84rem; }
+
+/* Chat */
+[data-testid="stChatMessage"] { border:0; padding:0; margin:0 0 1rem; background:transparent; }
+[data-testid="stChatMessage"] > div { border-radius:18px; padding:1rem 1.1rem; border:1px solid var(--line); box-shadow:0 4px 14px rgba(15,23,42,.035); }
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) > div { background:#EFF6FF; border-color:#BFDBFE; }
+[data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) > div { background:#FFF; }
+[data-testid="stChatMessage"] p, [data-testid="stChatMessage"] li { line-height:1.7; }
+[data-testid="stChatMessage"] ul, [data-testid="stChatMessage"] ol { padding-left:1.35rem; }
+[data-testid="stChatMessage"] strong { color:#0F172A; }
+[data-testid="stBottomBlockContainer"] { background:var(--page) !important; border-top:1px solid var(--line); }
+[data-testid="stChatInput"] { --background-color:#FFF !important; --secondary-background-color:#FFF !important; border:1px solid #BFDBFE !important; border-radius:16px; box-shadow:0 8px 22px rgba(37,99,235,.09); background:#FFF !important; }
+[data-testid="stChatInput"] > div, [data-testid="stChatInput"] [data-baseweb="base-input"], [data-testid="stChatInput"] [data-baseweb="textarea"], [data-testid="stChatInput"] textarea { background:#FFF !important; }
+[data-testid="stChatInput"] textarea { color:var(--ink) !important; -webkit-text-fill-color:var(--ink) !important; }
+textarea[data-testid="stChatInputTextArea"] { min-height:54px !important; font-size:16px !important; }
+
+img { max-width:100% !important; height:auto !important; border-radius:14px; }
+@media (max-width: 760px) { .block-container { padding:1rem 1rem 6rem; } .brand-title { font-size:1.7rem; } .page-title { font-size:1.35rem; } [data-testid="stSidebar"] { min-width:0 !important; } }
+</style>
+""", unsafe_allow_html=True)
 
 # =============================================================================
 # INITIALIZE AI MODELS (cached — load only once)
 # =============================================================================
+
 @st.cache_resource
 def init_models():
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
@@ -102,35 +162,20 @@ def init_models():
 
 embeddings_model, vision_ai, chat_ai = init_models()
 
-
 def encode_image(image: Image.Image) -> str:
     buffered = BytesIO()
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-
 # =============================================================================
 # PARALLEL POST-ANSWER GENERATOR
-# After every answer, we need two LLM calls:
-#   1. generate_followups()         — 3 follow-up question suggestions
-#   2. generate_practice_question() — 1 exam-style practice question
-#
-# Previously these ran sequentially, adding ~4-6s of blank wait after streaming.
-# Now both run simultaneously using ThreadPoolExecutor — total wait time drops
-# to roughly the slower of the two calls instead of the sum of both.
-#
-# A spinner is shown during this wait so the student sees feedback.
 # =============================================================================
+
 def generate_post_answer_content(
     answer: str,
     subject: str,
     grade: str,
 ) -> tuple[list[str], str]:
-    """
-    Runs generate_followups() and generate_practice_question() in parallel.
-    Returns (followups_list, practice_question_string).
-    Falls back gracefully — if either call fails, returns empty value for that one.
-    """
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_followups = executor.submit(
             generate_followups, answer, subject, grade, chat_ai
@@ -139,28 +184,22 @@ def generate_post_answer_content(
             generate_practice_question, answer, subject, grade, chat_ai
         )
         followups = future_followups.result()
-        practice  = future_practice.result()
-
+        practice = future_practice.result()
     return followups, practice
-
 
 # =============================================================================
 # STREAMING HELPER
 # =============================================================================
+
 def get_streaming_answer(
-    qa_chain,
+    vector_store: Chroma,
+    memory: list,
     prompt: str,
     grade: str,
     subject: str,
     hint_mode: bool
 ) -> tuple[str, list, bool]:
-    """
-    Returns (full_answer_string, source_docs, used_fallback).
-      - source_docs   -> reused for source tags, no second retrieval needed
-      - used_fallback -> True when no textbook content was found
-    """
-    retriever    = qa_chain.retriever
-    chat_history = qa_chain.memory.load_memory_variables({})["chat_history"]
+    chat_history = memory[-(MEMORY_WINDOW_K * 2):]
 
     if chat_history:
         rewritten = chat_ai.invoke(
@@ -169,75 +208,71 @@ def get_streaming_answer(
     else:
         rewritten = prompt
 
-    docs          = retriever.invoke(rewritten)
-    context       = "\n\n".join([d.page_content for d in docs])
+    # Chroma's raw distance API is used deliberately. Its built-in relevance
+    # mapping depends on the collection metric and can produce invalid scores.
+    # Lower distances are more similar.
+    scored_docs = vector_store.similarity_search_with_score(
+        rewritten,
+        k=RETRIEVER_K,
+        filter={
+            "$and": [
+                {"grade": grade},
+                {"subject": subject}
+            ]
+        }
+    )
+    docs = [
+        document for document, distance in scored_docs
+        if distance <= MAX_RETRIEVAL_DISTANCE
+    ]
+    context = "\n\n".join([d.page_content for d in docs])
     used_fallback = not bool(context.strip())
 
     student_name = st.session_state.get("student_name", "")
     system_text = build_system_prompt(grade, subject, hint_mode, student_name).replace(
         "{context}", context if context else "[No specific textbook content found. Use general knowledge.]"
     )
-    history_text = f"Chat history:\n{chat_history}\n\n" if chat_history else ""
 
+    history_text = f"Chat history:\n{chat_history}\n\n" if chat_history else ""
     final_messages = [
         SystemMessage(content=system_text),
         HumanMessage(content=f"{history_text}Student's question: {prompt}")
     ]
 
     full_answer = st.write_stream(chat_ai.stream(final_messages))
-    qa_chain.memory.chat_memory.add_user_message(prompt)
-    qa_chain.memory.chat_memory.add_ai_message(full_answer)
+
+    memory.extend([HumanMessage(content=prompt), AIMessage(content=full_answer)])
+    del memory[:-(MEMORY_WINDOW_K * 2)]
 
     return full_answer, docs, used_fallback
 
-
 # =============================================================================
 # MEMORY HELPERS — Subject-scoped
-#
-# Each subject gets its own memory and message list stored under a unique key:
-#   memory_Math, memory_Science, memory_English
-#   messages_Math, messages_Science, messages_English
-#
-# Switching subjects in the sidebar automatically loads that subject's history.
-# "Clear Chat" only wipes the currently active subject.
-# "Change Grade / Exit" wipes everything across all subjects.
 # =============================================================================
 
-# SUBJECTS and GRADES imported from config.py
-
 def memory_key(subject: str) -> str:
-    """Returns the session_state key for a subject's LangChain memory."""
     return f"memory_{subject}"
 
 def messages_key(subject: str) -> str:
-    """Returns the session_state key for a subject's chat display messages."""
     return f"messages_{subject}"
 
-def get_memory(subject: str) -> ConversationBufferWindowMemory:
-    """
-    Returns the memory object for the given subject.
-    Creates a fresh one if it doesn't exist yet.
-    k=5 → last 5 exchange pairs remembered per subject.
+def get_memory(subject: str) -> list:
+    """Return the session-local message history for one subject.
+
+    A plain list of LangChain messages replaces the deprecated memory classes.
     """
     key = memory_key(subject)
-    if key not in st.session_state:
-        st.session_state[key] = ConversationBufferWindowMemory(
-            k=MEMORY_WINDOW_K,
-            memory_key="chat_history",
-            return_messages=True,
-            output_key="answer"
-        )
+    if key not in st.session_state or not isinstance(st.session_state[key], list):
+        st.session_state[key] = []
     return st.session_state[key]
 
 def get_messages(subject: str) -> list:
-    """Returns the display message list for the given subject."""
     key = messages_key(subject)
     if key not in st.session_state:
         st.session_state[key] = []
     return st.session_state[key]
 
 def clear_subject(subject: str):
-    """Wipes memory + messages for one subject. Called on Clear Chat."""
     mem_key = memory_key(subject)
     msg_key = messages_key(subject)
     if mem_key in st.session_state:
@@ -246,209 +281,210 @@ def clear_subject(subject: str):
         st.session_state[msg_key] = []
 
 def clear_all_subjects():
-    """Wipes memory + messages for ALL subjects. Called on Change Grade / Exit."""
     for subj in SUBJECTS:
         clear_subject(subj)
 
+# =============================================================================
+# BUILD VECTOR STORE
+# =============================================================================
 
-# =============================================================================
-# BUILD CHAIN — ConversationalRetrievalChain (memory-aware)
-# Cached by grade + subject + hint_mode so it is NOT rebuilt on every
-# Streamlit rerun. Cache is busted automatically when any of these change.
-# NOTE: memory is NOT part of the cache key — get_memory() pulls it fresh
-# from session_state each time, so memory updates still work correctly.
-# =============================================================================
 @st.cache_resource(show_spinner=False)
-def build_qa_chain(grade: str, subject: str, hint_mode: bool):
+def get_vector_store() -> Chroma:
+    """Return the shared, read-only textbook vector store.
+
+    Conversation memory must never be cached here: Streamlit resource caches are
+    shared across sessions, while student memory belongs only in session state.
     """
-    How this chain works:
-    1. Student asks "explain that again" (a vague follow-up)
-    2. Chain internally rewrites it to a standalone question using chat history
-       e.g. → "Explain the photosynthesis process again in simple terms"
-    3. Retrieves relevant docs from Chroma using the rewritten question
-    4. Answers using: system prompt + RAG context + chat history + question
-    """
-    db = Chroma(persist_directory=DB_PATH, embedding_function=embeddings_model)
-    retriever = db.as_retriever(
-        search_kwargs={
-            "filter": {
-                "$and": [
-                    {"grade": grade},
-                    {"subject": subject}
-                ]
-            }
-        }
-    )
-
-    # student_name not cached in chain — injected via system prompt at chain build time
-    student_name = st.session_state.get("student_name", "")
-    system_prompt_text = build_system_prompt(grade, subject, hint_mode, student_name)
-
-    # Prompt for the final answer step
-    # Receives {context} from RAG + {chat_history} from memory + {question}
-    qa_prompt = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(system_prompt_text),
-        HumanMessagePromptTemplate.from_template(
-            "Chat history:\n{chat_history}\n\nStudent's question: {question}"
-        )
-    ])
-
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=chat_ai,
-        retriever=retriever,
-        memory=None,                        # ← memory injected at call time, not cached
-        return_source_documents=True,
-        combine_docs_chain_kwargs={"prompt": qa_prompt},
-        output_key="answer",
-        verbose=False
-    )
-    return chain
-
+    return Chroma(persist_directory=DB_PATH, embedding_function=embeddings_model)
 
 # =============================================================================
 # SESSION STATE
 # =============================================================================
-if "student_name" not in st.session_state:   st.session_state.student_name = ""       # student's name entered on welcome screen
-if "grade_locked" not in st.session_state:   st.session_state.grade_locked = False
-if "last_uploaded" not in st.session_state:  st.session_state.last_uploaded = None
-if "staged_image" not in st.session_state:   st.session_state.staged_image = None
-if "followups" not in st.session_state:      st.session_state.followups = []      # current follow-up suggestions
-if "pending_prompt" not in st.session_state: st.session_state.pending_prompt = None  # prompt triggered by button click
-if "practice_q" not in st.session_state:    st.session_state.practice_q = ""           # current practice question
-if "show_confidence" not in st.session_state: st.session_state.show_confidence = False  # whether to show star rating
-if "rating_log" not in st.session_state:    st.session_state.rating_log = []           # list of {subject, rating, topic}
-if "active_subject" not in st.session_state: st.session_state.active_subject = None    # tracks current subject to detect switches
 
+if "student_name"    not in st.session_state: st.session_state.student_name    = ""
+if "grade_locked"    not in st.session_state: st.session_state.grade_locked    = False
+if "last_uploaded"   not in st.session_state: st.session_state.last_uploaded   = None
+if "staged_image"    not in st.session_state: st.session_state.staged_image    = None
+if "followups"       not in st.session_state: st.session_state.followups       = []
+if "pending_prompt"  not in st.session_state: st.session_state.pending_prompt  = None
+if "practice_q"      not in st.session_state: st.session_state.practice_q      = ""
+if "show_confidence" not in st.session_state: st.session_state.show_confidence = False
+if "rating_log"      not in st.session_state: st.session_state.rating_log      = []
+if "active_subject"  not in st.session_state: st.session_state.active_subject  = None
 
 # =============================================================================
 # STEP 1: WELCOME / GRADE SELECTION
+# — Removed horizontal=True from radio so grades stack vertically on mobile
 # =============================================================================
+
 if not st.session_state.grade_locked:
-    st.title("🚀 EduSolve: Your Personal Tutor")
-    st.markdown(WELCOME_TEXT)
+    _, landing_column, _ = st.columns([1, 1.35, 1])
+    with landing_column:
+        st.markdown("""
+        <div class="brand-lockup">
+            <div class="brand-mark">✦</div>
+            <h1 class="brand-title">EduSolve AI</h1>
+            <p class="brand-subtitle">Your Personal AI Tutor</p>
+            <p class="brand-copy">Learn Mathematics, Science and English with an AI tutor that understands your textbooks and guides you step by step.</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    name_input = st.text_input(
-        "Your name:",
-        placeholder="e.g. Rohan",
-        max_chars=40
-    )
+        with st.container(border=True):
+            st.markdown("<p class='section-label'>Start your learning session</p>", unsafe_allow_html=True)
+            name_input = st.text_input(
+                "Student name",
+                placeholder="e.g. Rohan",
+                max_chars=40
+            )
+            grade = st.radio("Select your standard", GRADES)
 
-    grade = st.radio(
-        "Select Your Standard:",
-        GRADES,
-        horizontal=True
-    )
-
-    if st.button("Start Session →"):
-        if not name_input.strip():
-            st.warning("Please enter your name to continue!")
-        else:
-            st.session_state.student_name = name_input.strip().capitalize()
-            st.session_state.grade = grade
-            st.session_state.grade_locked = True
-            st.rerun()
-
+            if st.button("Start Learning", type="primary", use_container_width=True):
+                if not name_input.strip():
+                    st.warning("Please enter your name to continue!")
+                else:
+                    st.session_state.student_name = name_input.strip().capitalize()
+                    st.session_state.grade = grade
+                    st.session_state.grade_locked = True
+                    st.rerun()
 
 # =============================================================================
 # STEP 2: MAIN CLASSROOM INTERFACE
 # =============================================================================
+
 else:
+
     # --- Sidebar ---
     with st.sidebar:
-        st.title(f"📍 {st.session_state.student_name} — {st.session_state.grade}")
-        subject = st.selectbox("Subject:", SUBJECTS)
+        st.markdown("""
+        <div style="padding:.5rem 0 .15rem">
+            <div class="brand-mark" style="width:38px;height:38px;border-radius:12px;font-size:1.1rem;margin:0 0 .45rem">✦</div>
+            <p class="sidebar-name">EduSolve AI</p>
+            <p class="sidebar-meta">Personal learning space</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Detect subject switch — clear UI state that belongs to the previous subject
-        # so rating buttons and follow-up suggestions don't bleed across subjects
+        st.markdown("<p class='sidebar-heading'>Student</p>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(f"<p class='sidebar-name'>{html.escape(st.session_state.student_name)}</p>", unsafe_allow_html=True)
+            st.markdown(f"<p class='sidebar-meta'>{st.session_state.grade}</p>", unsafe_allow_html=True)
+
+        st.markdown("<p class='sidebar-heading'>Current subject</p>", unsafe_allow_html=True)
+        with st.container(border=True):
+            subject = st.selectbox("Subject", SUBJECTS, label_visibility="collapsed")
+
         if st.session_state.active_subject != subject:
-            st.session_state.active_subject  = subject
+            st.session_state.active_subject = subject
             st.session_state.show_confidence = False
-            st.session_state.followups       = []
-            st.session_state.practice_q      = ""
-        st.divider()
-
-        hint_mode = st.checkbox(
-            "💡 Hint Mode",
-            help="Agent gives hints instead of full answers."
-        )
-        st.divider()
-
-        uploaded_file = st.file_uploader("📷 Upload Question Photo", type=["jpg", "jpeg", "png"])
-
-        if uploaded_file and st.session_state.last_uploaded != uploaded_file.name:
-            st.session_state.last_uploaded = uploaded_file.name
-            st.session_state.staged_image = Image.open(uploaded_file)
-            st.rerun()
-
-        st.divider()
-
-        # Live memory counter — shows exchanges for the CURRENT subject only
-        exchange_count = len(get_memory(subject).chat_memory.messages) // 2
-        st.caption(f"🧠 {subject} Memory: {exchange_count}/5 exchanges stored")
-
-        if st.button("🔄 Clear Chat"):
-            clear_subject(subject)
-            st.session_state.staged_image = None
             st.session_state.followups = []
             st.session_state.practice_q = ""
-            st.session_state.show_confidence = False
-            st.rerun()
 
-        if st.button("🚪 Change Grade / Exit"):
-            st.session_state.grade_locked = False
-            st.session_state.student_name = ""
-            st.session_state.staged_image = None
-            st.session_state.followups = []
-            st.session_state.practice_q = ""
-            st.session_state.show_confidence = False
-            st.session_state.rating_log = []
-            clear_all_subjects()
-            st.rerun()
+        st.markdown("<p class='sidebar-heading'>Learning options</p>", unsafe_allow_html=True)
+        with st.container(border=True):
+            hint_mode = st.checkbox(
+                "Hint mode",
+                help="Agent gives hints instead of full answers."
+            )
+            st.caption("Guided clues instead of direct answers")
+
+        st.markdown("<p class='sidebar-heading'>Question image</p>", unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown("<p class='upload-title'>Upload question image</p><p class='upload-copy'>Drag and drop a clear photo, or browse files.</p>", unsafe_allow_html=True)
+            uploaded_file = st.file_uploader("Upload question image", type=["jpg", "jpeg", "png"], label_visibility="collapsed")
+            if uploaded_file and st.session_state.last_uploaded != uploaded_file.name:
+                st.session_state.last_uploaded = uploaded_file.name
+                st.session_state.staged_image = Image.open(uploaded_file)
+                st.rerun()
+
+        st.markdown("<p class='sidebar-heading'>Session</p>", unsafe_allow_html=True)
+        with st.container(border=True):
+            exchange_count = len(get_memory(subject)) // 2
+            st.caption(f"Memory: {exchange_count}/{MEMORY_WINDOW_K} exchanges")
+            if st.button("Clear current chat", use_container_width=True):
+                clear_subject(subject)
+                st.session_state.staged_image = None
+                st.session_state.followups = []
+                st.session_state.practice_q = ""
+                st.session_state.show_confidence = False
+                st.rerun()
+
+            if st.button("Change grade / exit session", use_container_width=True):
+                st.session_state.grade_locked = False
+                st.session_state.student_name = ""
+                st.session_state.staged_image = None
+                st.session_state.followups = []
+                st.session_state.practice_q = ""
+                st.session_state.show_confidence = False
+                st.session_state.rating_log = []
+                clear_all_subjects()
+                st.rerun()
 
     # --- Main Chat Area ---
-    st.title(f"🤖 Hi {st.session_state.student_name}! {subject} Tutor — {st.session_state.grade}")
+    st.markdown(f"""
+    <p class="page-kicker">{st.session_state.grade} · {subject}</p>
+    <h1 class="page-title">Learn with confidence, {html.escape(st.session_state.student_name)}</h1>
+    <p class="page-copy">Ask a question, upload an image, or choose a prompt to begin.</p>
+    """, unsafe_allow_html=True)
 
     if hint_mode:
-        st.info("💡 **Hint Mode ON** — I'll guide you with clues instead of full answers.")
+        st.markdown("<div class='hint-banner'><strong>Hint mode is on.</strong> You’ll get guided clues before the full answer.</div>", unsafe_allow_html=True)
 
-    qa_chain = build_qa_chain(st.session_state.grade, subject, hint_mode)
-    # Memory is NOT cached — inject it fresh from session_state every rerun
-    # so each subject keeps its own independent conversation history
-    qa_chain.memory = get_memory(subject)
+    vector_store = get_vector_store()
+    memory = get_memory(subject)
 
-    # Get this subject's message list
     subject_messages = get_messages(subject)
 
-    # --- Display Chat History (subject-specific) ---
+    # --- Display Chat History ---
     for msg in subject_messages:
-        with st.chat_message(msg["role"]):
+        avatar = "🧑‍🎓" if msg["role"] == "user" else "🤖"
+        with st.chat_message(msg["role"], avatar=avatar):
             if "image" in msg:
-                st.image(msg["image"], width=350)
-            st.markdown(msg["content"], unsafe_allow_html=True)
+                # ← CHANGED: use_column_width=True instead of width=350
+                # Prevents images from overflowing narrow phone screens
+                st.image(msg["image"], use_column_width=True)
+            # Chat content can come from the model, so never render it as HTML.
+            st.markdown(msg["content"])
+            if msg.get("sources"):
+                st.caption(f"📚 Source: {', '.join(msg['sources'])}")
+
+    if not subject_messages and not st.session_state.staged_image:
+        st.markdown(f"""
+        <div class="empty-state">
+            <div class="empty-icon">✦</div>
+            <h2>Hello, {html.escape(st.session_state.student_name)}!</h2>
+            <p>What would you like to learn today?</p>
+        </div>
+        """, unsafe_allow_html=True)
+        prompt_columns = st.columns(2)
+        starter_prompts = [
+            "Explain Algebra",
+            "Summarize today's lesson",
+            "Give me practice questions",
+            "Explain with examples",
+        ]
+        for index, starter_prompt in enumerate(starter_prompts):
+            with prompt_columns[index % 2]:
+                if st.button(starter_prompt, key=f"starter_{index}_{subject}", use_container_width=True):
+                    st.session_state.pending_prompt = starter_prompt
+                    st.rerun()
 
     # -------------------------------------------------------------------------
-    # CONFIDENCE CHECK — 3 compact buttons: No / Yes / Crystal clear!
-    # "No" (rating 1) auto-triggers a simpler re-explanation.
-    # All ratings saved to rating_log for future analytics.
+    # CONFIDENCE CHECK
+    # — CHANGED: replaced st.columns([2, 2, 3, 5]) with vertical button stack
+    #   Columns collapse to tiny unusable buttons on phones.
+    #   Vertical stack gives each button a full-width 44px tap target.
     # -------------------------------------------------------------------------
+
     if st.session_state.show_confidence:
-        st.markdown(
-            "<p style='margin:6px 0 4px;font-size:0.85rem;font-weight:600;"
-            "color:var(--text-color)'>Did you understand this?</p>",
-            unsafe_allow_html=True
-        )
-        # 3 tight buttons + 1 wide spacer to left-anchor them
-        # CONFIDENCE_OPTIONS imported from config.py
-        c_cols = st.columns([2, 2, 3, 5])
-        for i, (label, rating, should_reexplain) in enumerate(CONFIDENCE_OPTIONS):
-            with c_cols[i]:
+        with st.container(border=True):
+            st.markdown("<p class='section-label'>How confident do you feel?</p>", unsafe_allow_html=True)
+            for i, (label, rating, should_reexplain) in enumerate(CONFIDENCE_OPTIONS):
                 if st.button(label, key=f"conf_{i}_{subject}", use_container_width=True):
                     st.session_state.rating_log.append({
                         "student": st.session_state.student_name,
                         "subject": subject,
-                        "grade":   st.session_state.grade,
-                        "rating":  rating,
-                        "label":   label
+                        "grade": st.session_state.grade,
+                        "rating": rating,
+                        "label": label
                     })
                     st.session_state.show_confidence = False
                     if should_reexplain:
@@ -459,52 +495,38 @@ else:
                     st.rerun()
 
     # -------------------------------------------------------------------------
-    # PRACTICE QUESTION + FOLLOW-UPS — All in one compact inline row
-    # Practice button on the left, follow-up suggestions next to it.
-    # Number of columns = 1 (practice) + number of follow-ups + 1 (spacer).
+    # PRACTICE QUESTION + FOLLOW-UPS
+    # — CHANGED: replaced dynamic st.columns() grid with vertical button stack
+    #   Follow-up text can be long — it wraps badly in narrow columns on mobile.
+    #   Vertical stack keeps each suggestion fully readable.
     # -------------------------------------------------------------------------
+
     show_pq = bool(st.session_state.practice_q)
     show_fu = bool(st.session_state.followups)
 
     if show_pq or show_fu:
-        st.markdown(
-            "<p style='margin:8px 0 4px;font-size:0.85rem;font-weight:600;"
-            "color:var(--text-color)'>💡 What next?</p>",
-            unsafe_allow_html=True
-        )
-        # Build column list: each button gets weight 2, spacer gets the rest
-        fu_count  = len(st.session_state.followups) if show_fu else 0
-        pq_count  = 1 if show_pq else 0
-        btn_count = pq_count + fu_count
-        # Tight weights for buttons, large spacer at end to left-anchor them
-        col_weights = [2] * btn_count + [max(1, 12 - btn_count * 2)]
-        btn_cols = st.columns(col_weights)
+        with st.container(border=True):
+            st.markdown("<p class='section-label'>Continue learning</p>", unsafe_allow_html=True)
 
-        col_idx = 0
-
-        # Practice question button
-        if show_pq:
-            with btn_cols[col_idx]:
+            if show_pq:
                 if st.button(
-                    "🎯 Practice",
+                    "Practice question",
                     key=f"pq_btn_{subject}",
                     help=st.session_state.practice_q,
+                    type="primary",
                     use_container_width=True
                 ):
                     pq = st.session_state.practice_q
                     st.session_state.practice_q = ""
-                    st.session_state.followups  = []
+                    st.session_state.followups = []
                     st.session_state.show_confidence = False
                     st.session_state.pending_prompt = (
                         f"Give me this practice question and wait for my answer before explaining: {pq}"
                     )
                     st.rerun()
-            col_idx += 1
 
-        # Follow-up suggestion buttons
-        if show_fu:
-            for i, suggestion in enumerate(st.session_state.followups):
-                with btn_cols[col_idx]:
+            if show_fu:
+                for i, suggestion in enumerate(st.session_state.followups):
                     if st.button(
                         suggestion,
                         key=f"followup_{i}_{subject}",
@@ -513,39 +535,37 @@ else:
                         st.session_state.pending_prompt = suggestion
                         st.session_state.followups = []
                         st.rerun()
-                col_idx += 1
 
     # --- Staged Image Preview ---
     if st.session_state.staged_image and not any(
         m.get("image_id") == st.session_state.last_uploaded
         for m in subject_messages
     ):
-        st.info("🖼️ Image staged and ready. Type your question and press Enter.")
-        st.image(st.session_state.staged_image, width=350)
+        with st.container(border=True):
+            st.success("Image ready. Ask your question below.")
+            st.image(st.session_state.staged_image, use_column_width=True)
 
     # --- Chat Input ---
-    # Accepts input either from the text box OR a follow-up button click
-    typed_prompt = st.chat_input("Type your doubt here...")
+    typed_prompt = st.chat_input(f"Ask a {subject} question…")
     prompt = typed_prompt or st.session_state.pop("pending_prompt", None)
 
     if prompt:
-        # Clear follow-up suggestions whenever a new question comes in
         st.session_state.followups = []
         user_msg = {"role": "user", "content": prompt}
 
         # =====================================================================
-        # PATH A: Image + Text → Vision Model (with streaming)
+        # PATH A: Image + Text → Vision Model
         # =====================================================================
         if st.session_state.staged_image:
-            # --- Option 2: Subject pre-check before hitting the vision model ---
-            chat_history_for_check = str(get_memory(subject).chat_memory.messages)
+            chat_history_for_check = str(get_memory(subject))
             if not is_question_on_subject(prompt, subject, chat_history_for_check, chat_ai):
                 subject_messages.append(user_msg)
-                with st.chat_message("user"):
-                    st.image(st.session_state.staged_image, width=350)
+                with st.chat_message("user", avatar="🧑‍🎓"):
+                    # ← CHANGED: use_column_width=True
+                    st.image(st.session_state.staged_image, use_column_width=True)
                     st.markdown(prompt)
                 refusal = build_off_subject_message(subject, prompt, chat_ai)
-                with st.chat_message("assistant"):
+                with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(refusal)
                 subject_messages.append({"role": "assistant", "content": refusal})
                 st.session_state.staged_image = None
@@ -555,14 +575,14 @@ else:
             user_msg["image_id"] = st.session_state.last_uploaded
             subject_messages.append(user_msg)
 
-            with st.chat_message("user"):
-                st.image(st.session_state.staged_image, width=350)
+            with st.chat_message("user", avatar="🧑‍🎓"):
+                # ← CHANGED: use_column_width=True
+                st.image(st.session_state.staged_image, use_column_width=True)
                 st.markdown(prompt)
 
-            with st.chat_message("assistant"):
+            with st.chat_message("assistant", avatar="🤖"):
                 try:
                     b64 = encode_image(st.session_state.staged_image)
-
                     vision_system = build_system_prompt(
                         st.session_state.grade, subject, hint_mode,
                         st.session_state.student_name
@@ -571,9 +591,8 @@ else:
                         "[No textbook context for image questions. Use general knowledge.]"
                     )
 
-                    # Pass subject-scoped memory history to vision model
                     vision_messages = [SystemMessage(content=vision_system)]
-                    for mem_msg in get_memory(subject).chat_memory.messages:
+                    for mem_msg in get_memory(subject):
                         if isinstance(mem_msg, HumanMessage):
                             vision_messages.append(HumanMessage(content=mem_msg.content))
                         elif isinstance(mem_msg, AIMessage):
@@ -586,30 +605,25 @@ else:
                         ])
                     )
 
-                    # Stream the vision model response
                     answer = st.write_stream(vision_ai.stream(vision_messages))
 
-                    # Save to subject memory manually
-                    get_memory(subject).chat_memory.add_user_message(prompt)
-                    get_memory(subject).chat_memory.add_ai_message(answer)
-
+                    memory = get_memory(subject)
+                    memory.extend([HumanMessage(content=prompt), AIMessage(content=answer)])
+                    del memory[:-(MEMORY_WINDOW_K * 2)]
                     subject_messages.append({"role": "assistant", "content": answer})
                     st.session_state.staged_image = None
 
-                    # Image questions always use general knowledge (no RAG) —
-                    # show fallback warning so student knows this
                     st.markdown(
                         "<div class='fallback-warning'>⚠️ This answer is based on general knowledge, "
                         "not your specific textbook. Please verify with your teacher or notes.</div>",
                         unsafe_allow_html=True
                     )
 
-                    # Run both post-answer LLM calls in parallel (faster than sequential)
-                    with st.spinner("Generating suggestions..."):
+                    with st.spinner("Preparing your next learning steps…"):
                         fu, pq = generate_post_answer_content(
                             answer, subject, st.session_state.grade
                         )
-                    st.session_state.followups  = fu
+                    st.session_state.followups = fu
                     st.session_state.practice_q = pq
                     st.session_state.show_confidence = True
                     st.rerun()
@@ -618,45 +632,38 @@ else:
                     st.error(f"Error analyzing image: {e}")
 
         # =====================================================================
-        # PATH B: Text-only → Streaming RAG answer + follow-up suggestions
+        # PATH B: Text-only → Streaming RAG answer
         # =====================================================================
         else:
-            # --- Option 2: Subject pre-check before hitting the RAG chain ---
-            chat_history_for_check = str(get_memory(subject).chat_memory.messages)
+            chat_history_for_check = str(get_memory(subject))
             if not is_question_on_subject(prompt, subject, chat_history_for_check, chat_ai):
                 subject_messages.append(user_msg)
-                with st.chat_message("user"):
+                with st.chat_message("user", avatar="🧑‍🎓"):
                     st.markdown(prompt)
                 refusal = build_off_subject_message(subject, prompt, chat_ai)
-                with st.chat_message("assistant"):
+                with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(refusal)
                 subject_messages.append({"role": "assistant", "content": refusal})
                 st.rerun()
 
             subject_messages.append(user_msg)
-            with st.chat_message("user"):
+            with st.chat_message("user", avatar="🧑‍🎓"):
                 st.markdown(prompt)
 
-            with st.chat_message("assistant"):
+            with st.chat_message("assistant", avatar="🤖"):
                 try:
-                    # Stream answer — returns (answer, docs, used_fallback)
-                    # Single retrieval call covers both answer + source tags
                     answer, source_docs, used_fallback = get_streaming_answer(
-                        qa_chain, prompt,
+                        vector_store, memory, prompt,
                         st.session_state.grade, subject, hint_mode
                     )
 
-                    # Show source tags using docs already retrieved — no second retrieval
                     if source_docs:
-                        sources = set([
+                        sources = sorted({
                             os.path.basename(d.metadata.get('source', 'Unknown'))
                             for d in source_docs
-                        ])
-                        source_tag = f"\n\n<span class='source-tag'>📚 Source: {', '.join(sources)}</span>"
-                        st.markdown(source_tag, unsafe_allow_html=True)
-                        answer += source_tag
+                        })
+                        st.caption(f"📚 Source: {', '.join(sources)}")
 
-                    # Fallback warning — shown when RAG found nothing in the textbook
                     if used_fallback:
                         st.markdown(
                             "<div class='fallback-warning'>⚠️ I couldn't find this topic in your "
@@ -665,14 +672,17 @@ else:
                             unsafe_allow_html=True
                         )
 
-                    subject_messages.append({"role": "assistant", "content": answer})
+                    subject_messages.append({
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": sources if source_docs else []
+                    })
 
-                    # Run both post-answer LLM calls in parallel (faster than sequential)
-                    with st.spinner("Generating suggestions..."):
+                    with st.spinner("Preparing your next learning steps…"):
                         fu, pq = generate_post_answer_content(
                             answer, subject, st.session_state.grade
                         )
-                    st.session_state.followups  = fu
+                    st.session_state.followups = fu
                     st.session_state.practice_q = pq
                     st.session_state.show_confidence = True
                     st.rerun()
