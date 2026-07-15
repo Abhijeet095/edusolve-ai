@@ -45,9 +45,10 @@ DATA_PATH = os.path.join(BASE_DIR, "data")    # Where PDF textbooks are placed f
 # -----------------------------------------------------------------------------
 # RAG / RETRIEVAL
 # -----------------------------------------------------------------------------
-RETRIEVER_K   = 4     # Number of document chunks retrieved per question
-CHUNK_SIZE    = 1000  # Characters per chunk when splitting PDFs
-CHUNK_OVERLAP = 100   # Overlap between consecutive chunks
+RETRIEVER_K            = 4     # Maximum number of document chunks retrieved per question
+MAX_RETRIEVAL_DISTANCE = 1.20  # Reject weak Chroma matches; lower is stricter
+CHUNK_SIZE             = 1000  # Characters per chunk when splitting PDFs
+CHUNK_OVERLAP          = 100   # Overlap between consecutive chunks
 
 
 # -----------------------------------------------------------------------------
