@@ -18,6 +18,7 @@ __pycache__/
 
 # --- Vector Database ---
 chroma_db/
+db/
 
 # --- Project Specific ---
 .ipynb_checkpoints/
