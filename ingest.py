@@ -1,4 +1,7 @@
+import argparse
 import os
+import re
+import shutil
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -22,45 +25,47 @@ load_dotenv()
 # e.g. VALID_SUBJECTS = {"Math", "Science", "English"}
 VALID_GRADES   = set(GRADES)
 VALID_SUBJECTS = set(SUBJECTS)
+FILENAME_PATTERN = re.compile(
+    r"^(?P<grade>\d+)(?:st|nd|rd|th)_(?P<subject>[a-zA-Z]+?)(?:[_-]?\d+)?$",
+    re.IGNORECASE,
+)
 
 
-def build_knowledge_base():
+def build_knowledge_base(reset: bool = False):
     all_chunks = []
 
-    # -------------------------------------------------------------------------
-    # DUPLICATE GUARD
-    # If the DB folder already exists and has content, stop immediately.
-    # This prevents re-running ingest.py from duplicating all chunks in Chroma,
-    # which degrades retrieval quality over time.
-    # To re-ingest: delete the db/ folder manually, then run ingest.py again.
-    # -------------------------------------------------------------------------
+    # Rebuilding is explicit so an existing knowledge base cannot be overwritten
+    # by accident. --reset is safe from duplicate chunks because the old DB is
+    # removed only after valid replacement chunks have been prepared.
     if os.path.exists(DB_PATH) and os.listdir(DB_PATH):
-        print("⚠️  Knowledge base already exists at:", DB_PATH)
-        print("   To re-ingest, delete the db/ folder first, then run ingest.py again.")
-        print("   Skipping ingestion to prevent duplicate chunks.")
-        return
+        if not reset:
+            print("⚠️  Knowledge base already exists at:", DB_PATH)
+            print("   Run `python ingest.py --reset` to rebuild it after changing PDFs.")
+            return
+        print("🔄 A replacement knowledge base will be built with --reset.")
 
     print("🚀 Starting Local Ingestion...")
 
     for root, dirs, files in os.walk(DATA_PATH):
         for file in files:
-            if not file.endswith(".pdf"):
+            if not file.lower().endswith(".pdf"):
                 continue
 
             print(f"📂 Processing: {file}")
 
             # -----------------------------------------------------------------
             # FILENAME VALIDATION
-            # Expected convention: {grade_number}th_{subject}.pdf
-            # e.g. 8th_math.pdf, 10th_science.pdf, 9th_english.pdf
+            # Expected convention: {grade_number}{ordinal}_{subject}[part].pdf
+            # e.g. 8th_math.pdf, 10th_science1.pdf, 9th_english.pdf
             # -----------------------------------------------------------------
-            file_parts = file.replace(".pdf", "").split("_")
-            if len(file_parts) < 2:
-                print(f"  ⚠️  Skipping {file} — filename must be like 8th_math.pdf")
+            stem = os.path.splitext(file)[0]
+            match = FILENAME_PATTERN.fullmatch(stem)
+            if not match:
+                print(f"  ⚠️  Skipping {file} — filename must be like 8th_math.pdf or 10th_science1.pdf")
                 continue
 
-            grade_metadata   = f"Grade_{file_parts[0].replace('th', '')}"
-            subject_metadata = file_parts[1].capitalize()
+            grade_metadata = f"Grade_{match.group('grade')}"
+            subject_metadata = match.group("subject").capitalize()
 
             # Validate grade against config.py GRADES list
             if grade_metadata not in VALID_GRADES:
@@ -108,6 +113,9 @@ def build_knowledge_base():
     print(f"\n⏳ Generating embeddings for {len(all_chunks)} chunks (this may take a minute)...")
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
+    if reset and os.path.exists(DB_PATH):
+        shutil.rmtree(DB_PATH)
+
     Chroma.from_documents(
         documents=all_chunks,
         embedding=embeddings,
@@ -119,4 +127,11 @@ def build_knowledge_base():
 
 
 if __name__ == "__main__":
-    build_knowledge_base()
+    parser = argparse.ArgumentParser(description="Build the EduSolve Chroma knowledge base.")
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="replace the existing knowledge base after PDFs are added, removed, or changed",
+    )
+    args = parser.parse_args()
+    build_knowledge_base(reset=args.reset)
