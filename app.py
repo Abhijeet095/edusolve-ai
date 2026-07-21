@@ -479,20 +479,18 @@ else:
             <p>Choose a starting point or ask your own question below.</p>
         </div>
         """, unsafe_allow_html=True)
-        _, prompt_area, _ = main_column.columns([1, 2.2, 1])
-        with prompt_area:
-            prompt_columns = st.columns(2)
-            starter_prompts = [
-                "Explain Algebra",
-                "Summarize today's lesson",
-                "Give me practice questions",
-                "Explain with examples",
-            ]
-            for index, starter_prompt in enumerate(starter_prompts):
-                with prompt_columns[index % 2]:
-                    if st.button(starter_prompt, key=f"starter_{index}_{subject}", use_container_width=True):
-                        st.session_state.pending_prompt = starter_prompt
-                        st.rerun()
+        prompt_columns = main_column.columns(2)
+        starter_prompts = [
+            "Explain Algebra",
+            "Summarize today's lesson",
+            "Give me practice questions",
+            "Explain with examples",
+        ]
+        for index, starter_prompt in enumerate(starter_prompts):
+            with prompt_columns[index % 2]:
+                if st.button(starter_prompt, key=f"starter_{index}_{subject}", use_container_width=True):
+                    st.session_state.pending_prompt = starter_prompt
+                    st.rerun()
 
     # -------------------------------------------------------------------------
     # CONFIDENCE CHECK
